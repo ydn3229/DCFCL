@@ -1,6 +1,7 @@
 # FedCIL
 
- Implementation of *Dynamic Cooperation in  Federated Continual Learning*
+ Implementation of *Decentralized Dynamic Cooperation of Personalized Models for Federated
+Continual Learning*
 
 
 
