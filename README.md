@@ -1,4 +1,4 @@
-# FedCIL
+# DCFCL
 
  Implementation of *Decentralized Dynamic Cooperation of Personalized Models for Federated Continual Learning, NeurIPS' 25*
 
