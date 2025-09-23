@@ -87,6 +87,14 @@ class Client:
         self.beta = args.beta
         self.K = args.K
         self.local_model = copy.deepcopy(self.model)
+    #     AFCL
+        if self.args.AFCL == 1:
+            self.prototype = {"global": {}, "local": {}}
+            self.radius = {"global": 0, "local": 0}
+            self.feature_size = 512
+            self.num_sample_class = None
+
+
 
     def next_task(self, train, test, label_info=None, if_label=True):
 
@@ -428,6 +436,126 @@ class Client:
         return {'loss': loss.item(), 'correct_samples': acc, 'total_samples': sum_samples, 'acc_rate':acc_rate}
 
 
+    def train_a_batch_afcl(self, images, labels, device, args, old_model, mask, epoch_loss, round=None, proto_queue=None):
+
+        self.model.to(device)
+        labels = labels.long()
+
+        self.model.classifier_optimizer.zero_grad()
+        loss = self._compute_loss(images, labels, device, args, old_model, mask, round,
+                                  proto_queue)
+        self.model.classifier_optimizer.zero_grad()
+        loss["Total_loss"].backward()
+
+        self.model.classifier_optimizer.step()
+        epoch_loss.append(loss["Total_loss"].item())
+
+        return loss, epoch_loss
+
+    def _compute_loss(self, image, lables, device, args, old_model, old_class, mask=None, round=None,
+                      proto_queue=None):
+
+        # self-supervised learning based label augmentation
+        # image = torch.stack([torch.rot90(image, k, (2, 3)) for k in range(4)], 1)
+        # image = image.view(-1, 3, 32, 32)
+        # lables = torch.stack([lables * 4 + k for k in range(4)], 1).view(-1)
+
+        feature = self.model.classifier.feature(image)
+        output = self.model.classifier.fc(feature)
+        if mask:
+            lables = torch.stack([torch.tensor(mask.index(lab)) for lab in lables])
+            output = output[:, mask]
+
+        loss_cls = self.ce_loss(output, lables.long())
+        loss_dict = {"CE_loss": loss_cls,
+                     "Proto_aug_loss": torch.zeros(1).to(args.device),
+                     "Repr_learn_loss": torch.zeros(1).to(args.device),
+                     "Total_loss": 0}
+
+        proto_aug = []
+        proto_aug_label = []
+        location = args.location_proto_aug
+
+        # if local protos are aggregated after N rounds, during the first N-1 rounds use local proto
+        if args.location_proto_aug == "global" and not self.prototype["global"]:
+            location = "local"
+
+        prototype = self.prototype[location]
+        radius = self.radius[location]
+
+        if args.proto_queue and args.mean_proto_queue:
+            prototype = proto_queue.compute_mean()
+
+        index = [k for k, v in prototype.items() if
+                 np.sum(v) != 0 and (k not in self.current_labels or args.proto_loss_curr_classes)]
+        if index and args.lambda_proto_aug and (prototype is not None) and radius:
+            # select only the` indexes with old (non-empty) prototypes
+            for _ in range(args.batch_size):
+                np.random.shuffle(index)
+                if args.proto_queue and not args.mean_proto_queue:
+                    choice = np.random.choice(len(proto_queue.queue[index[0]]))
+                    p, r, num_samples_class = proto_queue.queue[index[0]][choice]
+                    temp = p + np.random.normal(0, 1, self.feature_size) * r
+                else:
+                    temp = prototype[index[0]] + np.random.normal(0, 1, self.feature_size) * radius
+                proto_aug.append(temp)
+                proto_aug_label.append(4 * index[0])
+            proto_aug = torch.from_numpy(np.float32(np.asarray(proto_aug))).float().to(device)
+            if len(proto_aug.shape) > 2:
+                proto_aug = proto_aug.squeeze()
+            proto_aug_label = torch.from_numpy(np.asarray(proto_aug_label)).long().to(device)
+            soft_feat_aug = self.model.fc(proto_aug)
+            loss_dict["Proto_aug_loss"] = nn.CrossEntropyLoss()(soft_feat_aug, proto_aug_label)
+
+        # REPR LEARNING LOSS
+        index = [k for k, v in prototype.items() if np.sum(v) != 0]
+        proto_aug_feat = []
+        proto_aug_lab = []
+        if index and args.lambda_repr_loss > 0. and (prototype is not None) and radius:
+            # select only the` indexes with old (non-empty) prototypes
+            for _ in range(args.batch_size):
+                np.random.shuffle(index)
+                proto_aug_feat.append(prototype[index[0]] + np.random.normal(0, 1, self.feature_size) * radius)
+                proto_aug_lab.append(index[0])
+            proto_aug_feat = torch.from_numpy(np.float32(np.asarray(proto_aug_feat))).float().to(device)
+            if len(proto_aug_feat.shape) > 2:
+                proto_aug_feat = proto_aug_feat.squeeze()
+            proto_aug_lab = torch.from_numpy(np.asarray(proto_aug_lab)).long().to(device)
+
+            wo_aug = args.repr_loss_wo_aug
+            if wo_aug:
+                slc = slice(0, -1, 4)  # W/O AUG
+            else:
+                slc = slice(None)  # W/ AUG
+            curr_cls_feat = feature[slc]
+            curr_cls_lab = torch.tensor([mask[i] / 4 for i in lables][slc]).int().to(device)
+            feat, lab = torch.cat([curr_cls_feat, proto_aug_feat], dim=0), torch.cat([curr_cls_lab, proto_aug_lab],
+                                                                                     dim=0)  # N x D, N
+            feat = F.normalize(feat, p=2., dim=1)
+            loss_tot = 0.
+            for c in self.current_classes:
+                Nc = (lab == c).sum()
+                if Nc <= 1: continue
+                feat_c = feat[lab == c]  # Nc x D
+                feat_not_c = feat[lab != c]  # Nnc x D
+                pos = feat_c @ feat_c.T / args.repr_loss_temp  # Nc x Nc
+                pos[torch.eye(Nc).bool()] *= 0.
+                neg = feat_c @ feat_not_c.T / args.repr_loss_temp  # Nc x Nnc
+                loss = pos - torch.logsumexp(torch.cat([pos, neg], dim=1), dim=1).unsqueeze(1)  # Nc x Nc
+                loss_tot += -1 * loss[~torch.eye(Nc).bool()].sum() / (Nc - 1)
+            loss_dict["Repr_learn_loss"] = loss_tot / lab.size(0)
+
+
+        loss_dict["Total_loss"] = loss_dict["CE_loss"] + \
+                                  loss_dict["Proto_aug_loss"] * args.lambda_proto_aug + \
+                                  loss_dict["Repr_learn_loss"] * args.lambda_repr_loss
+
+        return loss_dict
+
+
+
+
+
 
     def get_parameters(self):
         for param in self.model.classifier.parameters():
@@ -671,4 +799,5 @@ class Client:
                 control[name] = control[name].cuda()
             else:
                 control[name] = control[name].cpu()
+
 

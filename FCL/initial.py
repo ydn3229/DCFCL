@@ -44,6 +44,8 @@ class FCLInit(aggeregator):
         self.unique_labels = data['unique_labels']
         self.server_control = None
         self.client_control = None
+        self.proto_global = None
+
 
         # scaffold----------------------
         if args.scaffold == 1:
@@ -103,6 +105,7 @@ class FCLInit(aggeregator):
         all_acc = []
         all_accs = []
         all_forget = []
+        mask = None
         for task in range(args.ntask):
             # ===================
             # The First Task
@@ -170,24 +173,11 @@ class FCLInit(aggeregator):
 
             for glob_iter_ in range(epoch_per_task):
 
-                # ===================
-                #    visualization
-                # ===================
-                # if self.args.visual == 1:
-                #     my_classes_so_far = None
-                #     # 1. user side:
-                #     for num, u in enumerate(self.users):
-                #         my_classes_so_far = u.classes_so_far
-                #         for label in my_classes_so_far:
-                #             title = 'N'+ str(args.naive) +'-'+ str(self.current_task) + '-C' + str(num) +  '-' + str(label) + '-' + str(args.dataset)
-                #             visualize(self.generator, 25, title, [label])
-                #
-                #         my_classes_so_far = u.available_labels
-                #
-                #     # 2. user side:
-                #     for label in my_classes_so_far:
-                #         title = 'N'+ str(args.naive) +'-'+ str(self.current_task) + '-S-' + str(label) + '-' + str(args.dataset)
-                #         visualize(self.generator, 25, title, [label])
+                # 每一个通信轮
+                proto_locals = dict()
+                radius_locals = dict()
+                client_losses = []
+                w_locals = list()
 
                 glob_iter = glob_iter_ + epoch_per_task * task
 
@@ -223,10 +213,38 @@ class FCLInit(aggeregator):
                     if args.scaffold == 1:
                         self.set_control_cuda(self.client_control[user.id], True)
                     # perform regularization using generated samples after the first communication round
-                    user.train(
-                        glob_iter_,
-                        glob_iter,self.server_control, self.client_control
-                          )
+                    if args.AFCL == 1:
+                        if self.args.mask_model:
+                            mask = sorted([a * 4 + i for a in user.class_label for i in range(4)])
+                        if self.proto_global:
+                            self._update_proto_radius_labels(user)
+                        result = user.train(
+                            glob_iter_,
+                            glob_iter, self.server_control, self.client_control, mask, round=glob_iter, proto_queue=self.proto_queue)
+                        client_loss = result['loss_terms']
+                        num_sample_class = result['num_sample_class']
+                        client_losses.append(client_loss)
+
+                        radius, prototype, class_label = user.proto_save(user.current_labels)
+                        proto_locals[user_id] = {'sample_num': user.get_sample_number(),
+                                             'prototype': prototype,
+                                             'num_samples_class': num_sample_class}
+                        radius_locals[user_id] = {'sample_num': user.get_sample_number(),
+                                              'radius': radius}
+
+                        user.prototype["local"] = {**user.prototype["local"], **prototype}
+                        user.radius["local"] = radius
+
+                        self.proto_queue.insert(prototype, radius, num_sample_class)
+
+                        user.num_sample_class = num_sample_class
+                        w_locals.append((user.get_sample_number(), copy.deepcopy(user.model), user_id))
+
+                    else:
+                        user.train(
+                            glob_iter_,
+                            glob_iter,self.server_control, self.client_control, mask, round=None, proto_queue=None
+                              )
                     if args.FCL == 1:
                         user.compute_l2_norm()
                     if args.scaffold == 1:
@@ -348,10 +366,44 @@ class FCLInit(aggeregator):
                         all_accs.append(accs)
                         if task != 0:
                             forget_rate = self.evaluate_forget(all_accs, num_all)
-                            all_forget.append(forget_rate)
+
+                elif args.AFCL == 1:
+                    print(f"Aggregating model weights...")
+
+                    w_global = self._aggregate_w(w_locals)
+
+                    self.afcl_aggregate(args.global_weight, self.model, w_global)
+                    self.model=copy.deepcopy(w_global)
+
+
+                    if self.args.aggregate_proto_by_class:
+                        self.proto_global = self._aggregate_proto_by_class(proto_locals)
+                    else:
+                        self.proto_global = self._aggregate_proto(proto_locals)
+                    self.radius_global = self._aggregate_radius(radius_locals)
+                    self.init_send_parameters()
+
+                    accs, acc, num_all = self.evaluate_per_client_per_task()
+                    # form coalition models
+                    curr_timestamp = time.time()
+                    similarity_matrix = self.cal_cos()
+                    # print(similarity_matrix)
+                    op_par = self.optimal_bipartition(similarity_matrix)
+                    print(op_par)
+                    self.form_coalition_models()
+                    # send parameters from coalitions to clients
+                    self.send_parameters(task)
+                    accs, acc, num_all = self.evaluate_per_client_per_task()
+                    all_acc.append(acc)
+                    if glob_iter_ == epoch_per_task - 1:
+                        all_accs.append(accs)
+                        if task != 0:
+                            forget_rate = self.evaluate_forget(all_accs, num_all)
+
         print(all_acc)
         print(num_all)
-        # df = pd.DataFrame(all_acc)
+        #
+        # f = pd.DataFrame(all_acc)
         # name = 'acc' + '-' + args.dataset + '-' + 'FCL' + '-' + str(args.sw) + '.xlsx'
         # df.to_excel(name, index=False)
         # df = pd.DataFrame(all_forget)

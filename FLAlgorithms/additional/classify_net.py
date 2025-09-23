@@ -61,6 +61,22 @@ class S_ConvNet(nn.Module):
 
         return classes_p, logits
 
+    def feature(self, x):
+        xa = self.conv1(x)
+        xa = self.conv2(xa)
+        xa = self.conv3(xa)
+
+        xa = xa.view(xa.shape[0], (self.image_size//8)**2 * self.channel_size*4)
+
+        xa = F.relu(self.fc1(xa))
+        xa = F.relu(self.fc2(xa))
+        return xa
+    def fc(self, x):
+        logits = self.fc_classifier(x)
+        classes_p = self.softmax(logits)
+        return classes_p
+
+
 
 class Tset_ConvNet(nn.Module):
     def __init__(self, image_size, image_channel_size, channel_size, xa_dim, num_classes=10):

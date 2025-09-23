@@ -1,7 +1,6 @@
 # FedCIL
 
- Implementation of *Decentralized Dynamic Cooperation of Personalized Models for Federated
-Continual Learning*
+ Implementation of *Better Generative Replay for Continual Federated Learning, ICLR' 23*
 
 
 
@@ -19,6 +18,13 @@ pip install -r requirements.txt # install requirements
 3. To run our models:
 
 ```
-python main.py
+sh run-ous.sh # run generative replay based models
 ```
 
+
+
+## Note
+
+In the generative replay module, for the generative model, we adopt the commonly used backbone generative model (WGAN) in [Deep Generative Replay](https://github.com/kuc2477/pytorch-deep-generative-replay) (DGR). As specified in the paper, the backbone AC-GAN in our FedCIL is a tiny model with the similar structure of the WGAN in the above DGR implementation.
+
+The difference is that we add an auxiliary classification head to the top of the discriminator as introduced in [AC-GAN](https://arxiv.org/pdf/1610.09585.pdf).

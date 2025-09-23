@@ -48,6 +48,37 @@ class aggeregator:
         self.similarity_matrix = [[]]
         self.beta = args.beta
 
+        # AFCL代码
+        self.client_list = []
+
+        self.client_protos = dict()
+        self.global_radiuses = dict()
+
+        self.old_model = None
+
+        if self.args.model == "mobilenet":
+            self.feature_size = 1024
+        elif self.args.model == "resnet_18":
+            self.feature_size = 512
+
+        self.proto_global = None
+        self.radius_global = None
+        self.class_label = None
+
+        self.global_discovered_tasks = set()
+        self.global_discovered_classes = []
+        self.rounds_per_task = None
+        self.task_order = None
+        self.global_task_id = None
+        self.global_current_tasks = []
+        self.global_current_tasks_per_round = []
+        self.aggregated_proto_flag = False
+
+        self.proto_queue = ProtoQueue(n_classes=args.total_nc, max_length=args.proto_queue_length)
+        self.current_client_indexes = None
+
+
+
     def weights_init(self, m):
         classname = m.__class__.__name__
         if classname.find('Conv') != -1:
@@ -596,3 +627,206 @@ class aggeregator:
         ratio = 1.0 / len(self.selected_users)
         for user in self.selected_users:
             self.add_parameters(user, ratio)
+
+
+#     ---------------------------------------------AFCL-------------------------------------------
+    def afcl_aggregate(self,global_weight,old_model, new_model):
+        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        old_model.to(device)
+        new_model.to(device)
+        for old_param, new_param in zip(old_model.parameters(), new_model.parameters()):
+            new_param.data = old_param.data * (1-global_weight) + new_param.data.clone() * global_weight
+
+
+    def _compute_avg_radius(self, workers):
+        training_num = 0
+        avg_radius = 0
+        for idx in workers:
+            client = self.client_list[idx]
+            training_num += client.get_sample_number()
+
+        for idx in workers:
+            client = self.client_list[idx]
+            w = client.get_sample_number() / training_num
+            avg_radius += w * client.get_radius()
+
+        return avg_radius
+
+    def _check_local_protos(self, client, len_protos, current_task):
+        if not client.prototype["local"] or len(client.prototype["local"]) < len_protos:
+            if isinstance(client.prototype["local"], dict):
+                for c in self.task_classes[current_task]:
+                    if c not in client.prototype["local"].keys():
+                        client.prototype["local"][c] = np.zeros((1, self.feature_size))
+
+    def _aggregate_w(self, w_locals):
+
+        training_num = 0
+        for idx in range(len(w_locals)):
+            sample_num, _, _ = w_locals[idx]
+            training_num += sample_num
+
+        sample_num, averaged_params, _ = w_locals[0]
+        for k in averaged_params.keys():
+            for i in range(0, len(w_locals)):
+                local_sample_number, local_model_params, _ = w_locals[i]
+                w = local_sample_number / training_num
+                if i == 0:
+                    averaged_params[k] = local_model_params[k] * w
+                else:
+                    averaged_params[k] += local_model_params[k] * w
+        return averaged_params
+
+    def _aggregate_proto_by_class(self, proto_locals):
+        global_classes = set()
+
+        for client in proto_locals.keys():
+            global_classes = set.union(global_classes, set(proto_locals[client]["prototype"].keys()))
+        global_classes = list(global_classes)
+        proto_global = {k: np.zeros(self.feature_size) for k in global_classes}
+
+        weights_sums = {k: 0 for k in global_classes}
+
+        for client in proto_locals.keys():
+            local_proto = proto_locals[client]['prototype']
+            for j in global_classes:
+                if j in local_proto.keys() and not np.all(local_proto[j] == 0):
+                    w = proto_locals[client]["num_samples_class"][j]
+                    proto_global[j] += local_proto[j] * w
+                    weights_sums[j] += w
+
+        for j in global_classes:
+            if 0 < weights_sums[j] < 1:
+                proto_global[j] /= weights_sums[j]
+
+        if self.proto_global is not None:
+            for k in self.proto_global.keys():
+                if k in proto_global.keys():
+                    proto_global[k] = proto_global[k] * self.args.ema_global + self.proto_global[k] * (
+                            1 - self.args.ema_global)
+
+        return proto_global
+
+    def _aggregate_proto(self, proto_locals):
+        training_num = 0
+        global_classes = set()
+        for client in proto_locals.keys():
+            sample_num = proto_locals[client]['sample_num']
+            training_num += sample_num
+            global_classes = set.union(global_classes, set(proto_locals[client]["prototype"].keys()))
+
+        global_classes = list(global_classes)
+        proto_global = {k: np.zeros(self.feature_size) for k in global_classes}
+
+        weights_sums = {k: 0 for k in global_classes}
+
+        for client in proto_locals.keys():
+            local_sample_number = proto_locals[client]['sample_num']
+            local_proto = proto_locals[client]['prototype']
+            w = local_sample_number / training_num
+
+            for j in global_classes:
+                if j in local_proto.keys() and not np.all(local_proto[j] == 0):
+                    proto_global[j] += local_proto[j] * w
+                    weights_sums[j] += w
+
+        for j in global_classes:
+            if 0 < weights_sums[j] < 1:
+                proto_global[j] /= weights_sums[j]
+
+        if self.proto_global is not None:
+            for k in self.proto_global.keys():
+                if k in proto_global.keys():
+                    proto_global[k] = proto_global[k] * self.args.ema_global + self.proto_global[k] * (
+                            1 - self.args.ema_global)
+
+        return proto_global
+
+    def _aggregate_radius(self, radius_locals):
+        radius_global = 0
+        training_num = 0
+        for client in radius_locals.keys():
+            training_num += radius_locals[client]['sample_num']
+
+        for client in radius_locals.keys():
+            local_sample_number = radius_locals[client]['sample_num']
+            local_radius = radius_locals[client]['radius']
+            w = local_sample_number / training_num
+            radius_global += local_radius * w
+
+        if self.args.aggregate_mean_radius:
+            return np.mean([radius_locals[c]["radius"] for c in radius_locals.keys()])
+        else:
+            return radius_global
+
+    def _update_proto_radius_labels(self, client):
+        client.radius["global"] = copy.deepcopy(self.radius_global)
+        client.prototype["global"] = copy.deepcopy(self.proto_global)
+
+    def _update_class_labels(self, client, current_task):
+        client.class_label = list()
+        for task in range(current_task + 1):
+            client.class_label = self.task_classes[task] + client.class_label
+
+    def fetch_data(self, current_task, data_dict, data):
+        data_dict[f'task {current_task}'] = data
+
+    def save_protos(self, data, folder, path):
+        if not os.path.isdir(folder):
+            os.makedirs(folder)
+        with open(os.path.join(folder, path), 'wb') as file:
+            pickle.dump(data, file)
+            file.close()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+class ProtoQueue:
+
+    def __init__(self, n_classes, max_length):
+        self.n_classes = n_classes
+        self.queue = {i: [] for i in range(n_classes)}
+        self.max_length = max_length
+        self.global_proto = {i: 0 for i in range(n_classes)}
+
+    def insert(self, local_proto, local_radius, num_samples):
+        for class_id in local_proto.keys():
+            self.queue[class_id].append((local_proto[class_id], local_radius, num_samples[class_id]))
+
+            while len(self.queue[class_id]) > self.max_length:
+                self.queue[class_id].pop(0)
+
+    def get_num_samples(self, q_id,  class_id):
+        return self.queue[q_id][2][class_id]
+
+    def compute_mean(self):
+        for class_id in range(self.n_classes):
+            if len(self.queue[class_id]) > 1:
+                sum = 0
+                ws = 0
+                for item in self.queue[class_id]:
+                    ws += item[2]
+                    sum += item[0] * item[2]
+
+                self.global_proto[class_id] = sum / ws
+
+        return self.global_proto
+
+
+
