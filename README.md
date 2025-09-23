@@ -22,9 +22,4 @@ python main.py
 ```
 
 
-
-## Note
-
-In the generative replay module, for the generative model, we adopt the commonly used backbone generative model (WGAN) in [Deep Generative Replay](https://github.com/kuc2477/pytorch-deep-generative-replay) (DGR). As specified in the paper, the backbone AC-GAN in our FedCIL is a tiny model with the similar structure of the WGAN in the above DGR implementation.
-
-The difference is that we add an auxiliary classification head to the top of the discriminator as introduced in [AC-GAN](https://arxiv.org/pdf/1610.09585.pdf).
+ add an auxiliary classification head to the top of the discriminator as introduced in [AC-GAN](https://arxiv.org/pdf/1610.09585.pdf).
