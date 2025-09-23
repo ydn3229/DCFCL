@@ -1,6 +1,6 @@
 # FedCIL
 
- Implementation of *Better Generative Replay for Continual Federated Learning, ICLR' 23*
+ Implementation of *Decentralized Dynamic Cooperation of Personalized Models for Federated Continual Learning, NeurIPS' 25*
 
 
 
@@ -18,7 +18,7 @@ pip install -r requirements.txt # install requirements
 3. To run our models:
 
 ```
-sh run-ous.sh # run generative replay based models
+python main.py
 ```
 
 
