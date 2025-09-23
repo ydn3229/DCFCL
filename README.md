@@ -20,6 +20,3 @@ pip install -r requirements.txt # install requirements
 ```
 python main.py
 ```
-
-
- add an auxiliary classification head to the top of the discriminator as introduced in [AC-GAN](https://arxiv.org/pdf/1610.09585.pdf).
