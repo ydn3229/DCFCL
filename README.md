@@ -3,7 +3,7 @@
 
 ## Official
 
- Implementation of Our *Decentralized Dynamic Cooperation of Personalized Models for Federated Continual Learning, NeurIPS' 25* paper.
+ Implementation of our *Decentralized Dynamic Cooperation of Personalized Models for Federated Continual Learning, NeurIPS' 25* paper.
 
 
 
