@@ -22,3 +22,6 @@ pip install -r requirements.txt # install requirements
 ```
 python main.py
 ```
+
+## License
+This project is licensed under the MIT License - see the LICENSE file for details.
